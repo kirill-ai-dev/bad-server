@@ -6,6 +6,7 @@ import {
     Toolbar,
 } from 'react-simple-wysiwyg'
 import './editor-input.scss'
+import { sanitizeComment } from '../../utils/sanitize'
 
 type EditorInputProps = {
     value: string
@@ -22,14 +23,13 @@ export default function EditorInput({ onChange, value }: EditorInputProps) {
         '🔗',
         ({ $selection }) => {
             if ($selection?.nodeName === 'A') {
+                const url = prompt('URL', '') || ''
+                if (!/^https?:\/\//i.test(url)) return
                 document.execCommand('unlink')
             } else {
-                // eslint-disable-next-line no-alert
-                document.execCommand(
-                    'createLink',
-                    false,
-                    prompt('URL', '') || undefined
-                )
+                const url = prompt('URL', '') || ''
+                if (!/^https?:\/\//i.test(url)) return
+                document.execCommand('createLink', false, url)
             }
         }
     )
@@ -37,7 +37,10 @@ export default function EditorInput({ onChange, value }: EditorInputProps) {
     return (
         <div className='customEditor'>
             <EditorProvider>
-                <Editor value={value} onChange={handleChangeElement}>
+                <Editor
+                    value={sanitizeComment(value)}
+                    onChange={handleChangeElement}
+                >
                     <Toolbar>
                         <span className='rsw-link-title'>
                             Вставить ссылку <BtnLinkCustom />

@@ -9,6 +9,7 @@ import ConflictError from '../errors/conflict-error'
 import NotFoundError from '../errors/not-found-error'
 import UnauthorizedError from '../errors/unauthorized-error'
 import User from '../models/user'
+import { sessionVersionFilter } from '../utils/sessionVersion'
 
 // POST /auth/login
 const login = async (req: Request, res: Response, next: NextFunction) => {
@@ -72,12 +73,14 @@ const getCurrentUser = async (
 ) => {
     try {
         const userId = res.locals.user._id
-        const user = await User.findById(userId).orFail(
-            () =>
-                new NotFoundError(
-                    'Пользователь по заданному id отсутствует в базе'
-                )
-        )
+        const user = await User.findById(userId)
+            .select('-orders -tokens')
+            .orFail(
+                () =>
+                    new NotFoundError(
+                        'Пользователь по заданному id отсутствует в базе'
+                    )
+            )
         res.json({ user, success: true })
     } catch (error) {
         next(error)
@@ -97,22 +100,32 @@ const deleteRefreshTokenInUser = async (
         throw new UnauthorizedError('Не валидный токен')
     }
 
-    const decodedRefreshTkn = jwt.verify(
-        rfTkn,
-        REFRESH_TOKEN.secret
-    ) as JwtPayload
-    const user = await User.findOne({
-        _id: decodedRefreshTkn._id,
-    }).orFail(() => new UnauthorizedError('Пользователь не найден в базе'))
-
+    let decodedRefreshTkn: JwtPayload
+    try {
+        decodedRefreshTkn = jwt.verify(rfTkn, REFRESH_TOKEN.secret, {
+            algorithms: ['HS256'],
+        }) as JwtPayload
+    } catch (_error) {
+        throw new UnauthorizedError('Не валидный токен')
+    }
+    if (
+        !Number.isSafeInteger(decodedRefreshTkn.version) ||
+        decodedRefreshTkn.version < 0
+    )
+        throw new UnauthorizedError('Не валидный токен')
     const rTknHash = crypto
         .createHmac('sha256', REFRESH_TOKEN.secret)
         .update(rfTkn)
         .digest('hex')
-
-    user.tokens = user.tokens.filter((tokenObj) => tokenObj.token !== rTknHash)
-
-    await user.save()
+    const user = await User.findOneAndUpdate(
+        {
+            _id: decodedRefreshTkn.sub,
+            'tokens.token': rTknHash,
+            ...sessionVersionFilter(decodedRefreshTkn.version),
+        },
+        { $pull: { tokens: { token: rTknHash } } },
+        { new: true, projection: { orders: 0, tokens: 0 } }
+    ).orFail(() => new UnauthorizedError('Не валидный токен'))
 
     return user
 }
@@ -121,7 +134,26 @@ const deleteRefreshTokenInUser = async (
 // GET  /auth/logout
 const logout = async (req: Request, res: Response, next: NextFunction) => {
     try {
-        await deleteRefreshTokenInUser(req, res, next)
+        const token = req.cookies[REFRESH_TOKEN.cookie.name]
+        let payload: JwtPayload
+        try {
+            payload = jwt.verify(token, REFRESH_TOKEN.secret, {
+                algorithms: ['HS256'],
+            }) as JwtPayload
+            if (!Number.isSafeInteger(payload.version) || payload.version < 0)
+                throw new Error('Invalid version')
+        } catch (_error) {
+            throw new UnauthorizedError('Не валидный токен')
+        }
+        // Revocation is independent of the consumed hash, closing refresh/logout races.
+        // An older epoch is an idempotent logout and cannot revoke a later login.
+        await User.updateOne(
+            { _id: payload.sub, ...sessionVersionFilter(payload.version) },
+            {
+                $inc: { sessionVersion: 1 },
+                $set: { tokens: [] },
+            }
+        )
         const expireCookieOptions = {
             ...REFRESH_TOKEN.cookie.options,
             maxAge: -1,
@@ -164,25 +196,8 @@ const refreshAccessToken = async (
     }
 }
 
-const getCurrentUserRoles = async (
-    req: Request,
-    res: Response,
-    next: NextFunction
-) => {
-    const userId = res.locals.user._id
-    try {
-        await User.findById(userId, req.body, {
-            new: true,
-        }).orFail(
-            () =>
-                new NotFoundError(
-                    'Пользователь по заданному id отсутствует в базе'
-                )
-        )
-        res.status(200).json(res.locals.user.roles)
-    } catch (error) {
-        next(error)
-    }
+const getCurrentUserRoles = (_req: Request, res: Response) => {
+    res.status(200).json(res.locals.user.roles)
 }
 
 const updateCurrentUser = async (
@@ -192,9 +207,15 @@ const updateCurrentUser = async (
 ) => {
     const userId = res.locals.user._id
     try {
-        const updatedUser = await User.findByIdAndUpdate(userId, req.body, {
-            new: true,
-        }).orFail(
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            { $set: req.body },
+            {
+                new: true,
+                runValidators: true,
+                projection: { orders: 0, tokens: 0 },
+            }
+        ).orFail(
             () =>
                 new NotFoundError(
                     'Пользователь по заданному id отсутствует в базе'

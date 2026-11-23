@@ -47,6 +47,7 @@ export interface IOrder {
 }
 
 export interface IUser {
+    id: string
     email: string
     name: string
 }
@@ -56,7 +57,7 @@ export interface ICustomer extends IUser {
     lastOrder: string
     lastOrderDate: string
     orderCount: number
-    orders: string[]
+    orders?: string[]
     roles: string[]
     totalAmount: number
 }
@@ -91,7 +92,7 @@ export type UserLoginBodyDto = {
 
 export type UserRegisterBodyDto = {
     password: string
-} & IUser
+} & Omit<IUser, 'id'>
 
 export type OrderForm = Omit<IOrder, 'total' | 'items'>
 

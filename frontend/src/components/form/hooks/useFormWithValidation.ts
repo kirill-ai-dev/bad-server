@@ -41,9 +41,9 @@ export default function useFormWithValidation<T>(
 
     const setValuesForm = useCallback(
         (data: Partial<T>) => {
-            setValues({ ...values, ...data })
+            setValues(previous => ({ ...previous, ...data }))
         },
-        [values]
+        []
     )
 
     useEffect(() => {

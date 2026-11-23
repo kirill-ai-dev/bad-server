@@ -6,13 +6,13 @@ import { useActionCreators } from '../../services/hooks'
 import { userActions } from '../../services/slice/user'
 import styles from './logout-page.module.scss'
 export default function LogoutPage() {
-    const { logoutUser, resetUser } = useActionCreators(userActions)
+    const { logoutUser } = useActionCreators(userActions)
     const navigate = useNavigate()
     const handleFormSubmit = (e: SyntheticEvent<HTMLFormElement>) => {
         e.preventDefault()
         logoutUser()
             .unwrap()
-            .then(() => resetUser())
+            .catch(() => undefined)
     }
 
     return (

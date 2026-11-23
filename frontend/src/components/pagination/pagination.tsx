@@ -23,6 +23,7 @@ const Pagination: React.FC<PaginationProps> = ({
         <div className={styles.container}>
             <button
                 onClick={onPrevPage}
+                aria-label="Предыдущая страница"
                 className={clsx(styles.buttonAction)}
                 disabled={currentPage === 1}
             >
@@ -39,6 +40,7 @@ const Pagination: React.FC<PaginationProps> = ({
             </span>
             <button
                 onClick={onNextPage}
+                aria-label="Следующая страница"
                 className={clsx(styles.buttonAction)}
                 disabled={currentPage === totalPages}
             >
@@ -57,8 +59,6 @@ const Pagination: React.FC<PaginationProps> = ({
                 >
                     <option value={5}>5</option>
                     <option value={10}>10</option>
-                    <option value={20}>20</option>
-                    <option value={50}>50</option>
                 </select>
             )}
         </div>

@@ -3,10 +3,11 @@ import crypto from 'crypto'
 import jwt from 'jsonwebtoken'
 import mongoose, { Document, HydratedDocument, Model, Types } from 'mongoose'
 import validator from 'validator'
-import md5 from 'md5'
+import bcrypt from 'bcryptjs'
 
 import { ACCESS_TOKEN, REFRESH_TOKEN } from '../config'
 import UnauthorizedError from '../errors/unauthorized-error'
+import { sessionVersionFilter } from '../utils/sessionVersion'
 
 export enum Role {
     Customer = 'customer',
@@ -17,6 +18,7 @@ export interface IUser extends Document {
     name: string
     email: string
     password: string
+    sessionVersion: number
     tokens: { token: string }[]
     roles: Role[]
     phone: string
@@ -68,6 +70,7 @@ const userSchema = new mongoose.Schema<IUser, IUserModel, IUserMethods>(
             select: false,
         },
 
+        sessionVersion: { type: Number, default: 0 },
         tokens: [
             {
                 token: { required: true, type: String },
@@ -106,7 +109,15 @@ const userSchema = new mongoose.Schema<IUser, IUserModel, IUserMethods>(
         toJSON: {
             virtuals: true,
             transform: (_doc, ret) => {
-                const { tokens: _tokens, password: _password, _id, roles: _roles, ...rest } = ret
+                const {
+                    sessionVersion: _sessionVersion,
+                    tokens: _tokens,
+                    orders: _orders,
+                    password: _password,
+                    _id,
+                    roles: _roles,
+                    ...rest
+                } = ret
                 return rest
             },
         },
@@ -117,7 +128,7 @@ const userSchema = new mongoose.Schema<IUser, IUserModel, IUserMethods>(
 userSchema.pre('save', async function hashingPassword(next) {
     try {
         if (this.isModified('password')) {
-            this.password = md5(this.password)
+            this.password = await bcrypt.hash(this.password, 12)
         }
         next()
     } catch (error) {
@@ -134,6 +145,7 @@ userSchema.methods.generateAccessToken = function generateAccessToken() {
         {
             _id: user._id.toString(),
             email: user.email,
+            version: user.sessionVersion || 0,
         },
         ACCESS_TOKEN.secret,
         {
@@ -150,6 +162,8 @@ userSchema.methods.generateRefreshToken =
         const refreshToken = jwt.sign(
             {
                 _id: user._id.toString(),
+                jti: crypto.randomUUID(),
+                version: user.sessionVersion || 0,
             },
             REFRESH_TOKEN.secret,
             {
@@ -165,9 +179,20 @@ userSchema.methods.generateRefreshToken =
             .digest('hex')
 
         // Сохраняем refresh токена в базу данных, можно делать в контроллере авторизации/регистрации
-        user.tokens.push({ token: rTknHash })
-        await user.save()
+        const result = await mongoose.model<IUser>('user').updateOne(
+            {
+                _id: user._id,
+                ...sessionVersionFilter(user.sessionVersion || 0),
+            },
+            {
+                $push: {
+                    tokens: { $each: [{ token: rTknHash }], $slice: -10 },
+                },
+            }
+        )
 
+        if (result.matchedCount !== 1)
+            throw new UnauthorizedError('Сессия завершена')
         return refreshToken
     }
 
@@ -176,9 +201,9 @@ userSchema.statics.findUserByCredentials = async function findByCredentials(
     password: string
 ) {
     const user = await this.findOne({ email })
-        .select('+password')
+        .select('+password -orders -tokens')
         .orFail(() => new UnauthorizedError('Неправильные почта или пароль'))
-    const passwdMatch = md5(password) === user.password
+    const passwdMatch = await bcrypt.compare(password, user.password)
     if (!passwdMatch) {
         return Promise.reject(
             new UnauthorizedError('Неправильные почта или пароль')

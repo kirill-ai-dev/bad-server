@@ -9,6 +9,11 @@ services:
 
   mongo:
     image: mongo
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     restart: always
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
@@ -16,31 +21,43 @@ services:
     volumes:
       - db:/data/db
     ports:
-      - 27018:27017
+      - 127.0.0.1:27018:27017
     networks:
       - internal
 
   backend:
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     restart: always
     build:
       context: backend
     env_file:
       - backend/.env
+    environment:
+      TRUSTED_PROXIES: 172.30.187.10
     volumes:
       - ./backend/src:/app/src
       - public:/app/src/public
     ports:
-      - 3000:3000
+      - 127.0.0.1:3000:3000
     networks:
       - internal
     depends_on:
       - mongo
 
   server:
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '3'
     build:
       context: nginx
     ports:
-      - 80:80
+      - 127.0.0.1:80:80
     volumes:
       - frontend:/var/app
       - public:/var/public
@@ -48,7 +65,8 @@ services:
       - frontend
       - backend
     networks:
-      - internal
+      internal:
+        ipv4_address: 172.30.187.10
 
 volumes:
   frontend:
@@ -57,3 +75,6 @@ volumes:
 
 networks:
   internal:
+    ipam:
+      config:
+        - subnet: 172.30.187.0/24

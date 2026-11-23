@@ -1,5 +1,6 @@
-import { NextFunction, Request, Response } from 'express'
-import { constants } from 'http2'
+import { Request, Response, NextFunction } from 'express'
+import sharp from 'sharp'
+import { storeImage, withImageStorageLock } from '../utils/imageStorage'
 import BadRequestError from '../errors/bad-request-error'
 
 export const uploadFile = async (
@@ -7,20 +8,24 @@ export const uploadFile = async (
     res: Response,
     next: NextFunction
 ) => {
-    if (!req.file) {
-        return next(new BadRequestError('Файл не загружен'))
-    }
+    if (!req.file || req.file.size <= 2048)
+        return next(new BadRequestError('Недопустимый файл'))
     try {
-        const fileName = process.env.UPLOAD_PATH
-            ? `/${process.env.UPLOAD_PATH}/${req.file.filename}`
-            : `/${req.file?.filename}`
-        return res.status(constants.HTTP_STATUS_CREATED).send({
-            fileName,
-            originalName: req.file?.originalname,
+        const data = await sharp(req.file.buffer, {
+            limitInputPixels: 16000000,
         })
-    } catch (error) {
-        return next(error)
+            .png()
+            .toBuffer()
+        if (data.length > 5 * 1024 * 1024)
+            throw new BadRequestError(
+                'Размер изображения после обработки превышен'
+            )
+        const fileName = await withImageStorageLock(() => storeImage(data))
+        return res.status(201).json({
+            fileName,
+            originalName: req.file.originalname,
+        })
+    } catch (_error) {
+        return next(new BadRequestError('Недопустимое изображение'))
     }
 }
-
-export default {}

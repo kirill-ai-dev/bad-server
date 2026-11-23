@@ -1,10 +1,10 @@
 import { NextFunction, Request, Response } from 'express'
 import { FilterQuery, Error as MongooseError, Types } from 'mongoose'
+import escapeRegExp from '../utils/escapeRegExp'
 import BadRequestError from '../errors/bad-request-error'
 import NotFoundError from '../errors/not-found-error'
 import Order, { IOrder } from '../models/order'
 import Product, { IProduct } from '../models/product'
-import User from '../models/user'
 
 // eslint-disable-next-line max-len
 // GET /orders?page=2&limit=5&sort=totalAmount&order=desc&orderDateFrom=2024-07-01&orderDateTo=2024-08-01&status=delivering&totalAmountFrom=100&totalAmountTo=1000&search=%2B1
@@ -31,9 +31,6 @@ export const getOrders = async (
         const filters: FilterQuery<Partial<IOrder>> = {}
 
         if (status) {
-            if (typeof status === 'object') {
-                Object.assign(filters, status)
-            }
             if (typeof status === 'string') {
                 filters.status = status
             }
@@ -67,72 +64,32 @@ export const getOrders = async (
             }
         }
 
-        const aggregatePipeline: any[] = [
-            { $match: filters },
-            {
-                $lookup: {
-                    from: 'products',
-                    localField: 'products',
-                    foreignField: '_id',
-                    as: 'products',
-                },
-            },
-            {
-                $lookup: {
-                    from: 'users',
-                    localField: 'customer',
-                    foreignField: '_id',
-                    as: 'customer',
-                },
-            },
-            { $unwind: '$customer' },
-            { $unwind: '$products' },
-        ]
-
         if (search) {
-            const searchRegex = new RegExp(search as string, 'i')
-            const searchNumber = Number(search)
-
-            const searchConditions: any[] = [{ 'products.title': searchRegex }]
-
-            if (!Number.isNaN(searchNumber)) {
-                searchConditions.push({ orderNumber: searchNumber })
-            }
-
-            aggregatePipeline.push({
-                $match: {
-                    $or: searchConditions,
-                },
-            })
-
-            filters.$or = searchConditions
+            const matches = await Product.find({
+                title: new RegExp(escapeRegExp(String(search)), 'i'),
+            }).select('_id')
+            filters.$or = [
+                { products: { $in: matches.map((product) => product._id) } },
+            ]
+            const number = Number(search)
+            if (Number.isSafeInteger(number))
+                filters.$or.push({ orderNumber: number })
         }
-
-        const sort: { [key: string]: any } = {}
-
-        if (sortField && sortOrder) {
-            sort[sortField as string] = sortOrder === 'desc' ? -1 : 1
+        const sort: Record<string, 1 | -1> = {
+            [String(sortField)]: sortOrder === 'asc' ? 1 : -1,
+            _id: 1,
         }
-
-        aggregatePipeline.push(
-            { $sort: sort },
-            { $skip: (Number(page) - 1) * Number(limit) },
-            { $limit: Number(limit) },
-            {
-                $group: {
-                    _id: '$_id',
-                    orderNumber: { $first: '$orderNumber' },
-                    status: { $first: '$status' },
-                    totalAmount: { $first: '$totalAmount' },
-                    products: { $push: '$products' },
-                    customer: { $first: '$customer' },
-                    createdAt: { $first: '$createdAt' },
-                },
-            }
-        )
-
-        const orders = await Order.aggregate(aggregatePipeline)
-        const totalOrders = await Order.countDocuments(filters)
+        const [orders, totalOrders] = await Promise.all([
+            Order.find(filters)
+                .sort(sort)
+                .skip((Number(page) - 1) * Number(limit))
+                .limit(Number(limit))
+                .populate([
+                    { path: 'customer', select: '-orders -tokens' },
+                    { path: 'products' },
+                ]),
+            Order.countDocuments(filters),
+        ])
         const totalPages = Math.ceil(totalOrders / Number(limit))
 
         res.status(200).json({
@@ -155,60 +112,31 @@ export const getOrdersCurrentUser = async (
     next: NextFunction
 ) => {
     try {
-        const userId = res.locals.user._id
         const { search, page = 1, limit = 5 } = req.query
-        const options = {
-            skip: (Number(page) - 1) * Number(limit),
-            limit: Number(limit),
-        }
-
-        const user = await User.findById(userId)
-            .populate({
-                path: 'orders',
-                populate: [
-                    {
-                        path: 'products',
-                    },
-                    {
-                        path: 'customer',
-                    },
-                ],
-            })
-            .orFail(
-                () =>
-                    new NotFoundError(
-                        'Пользователь по заданному id отсутствует в базе'
-                    )
-            )
-
-        let orders = user.orders as unknown as IOrder[]
-
+        const filters: FilterQuery<IOrder> = { customer: res.locals.user._id }
         if (search) {
-            // если не экранировать то получаем Invalid regular expression: /+1/i: Nothing to repeat
-            const searchRegex = new RegExp(search as string, 'i')
-            const searchNumber = Number(search)
-            const products = await Product.find({ title: searchRegex })
-            const productIds = products.map((product) => product._id)
-
-            orders = orders.filter((order) => {
-                // eslint-disable-next-line max-len
-                const matchesProductTitle = order.products.some((product) =>
-                    productIds.some((id) => id.equals(product._id))
-                )
-                // eslint-disable-next-line max-len
-                const matchesOrderNumber =
-                    !Number.isNaN(searchNumber) &&
-                    order.orderNumber === searchNumber
-
-                return matchesOrderNumber || matchesProductTitle
-            })
+            const matches = await Product.find({
+                title: new RegExp(escapeRegExp(String(search)), 'i'),
+            }).select('_id')
+            filters.$or = [
+                { products: { $in: matches.map((product) => product._id) } },
+            ]
+            const number = Number(search)
+            if (Number.isSafeInteger(number))
+                filters.$or.push({ orderNumber: number })
         }
-
-        const totalOrders = orders.length
+        const [orders, totalOrders] = await Promise.all([
+            Order.find(filters)
+                .sort({ createdAt: -1, _id: -1 })
+                .skip((Number(page) - 1) * Number(limit))
+                .limit(Number(limit))
+                .populate([
+                    { path: 'products' },
+                    { path: 'customer', select: '-orders -tokens' },
+                ]),
+            Order.countDocuments(filters),
+        ])
         const totalPages = Math.ceil(totalOrders / Number(limit))
-
-        orders = orders.slice(options.skip, options.skip + options.limit)
-
         return res.send({
             orders,
             pagination: {
@@ -233,7 +161,10 @@ export const getOrderByNumber = async (
         const order = await Order.findOne({
             orderNumber: req.params.orderNumber,
         })
-            .populate(['customer', 'products'])
+            .populate([
+                { path: 'customer', select: '-orders -tokens' },
+                { path: 'products' },
+            ])
             .orFail(
                 () =>
                     new NotFoundError(
@@ -259,7 +190,10 @@ export const getOrderCurrentUserByNumber = async (
         const order = await Order.findOne({
             orderNumber: req.params.orderNumber,
         })
-            .populate(['customer', 'products'])
+            .populate([
+                { path: 'customer', select: '-orders -tokens' },
+                { path: 'products' },
+            ])
             .orFail(
                 () =>
                     new NotFoundError(
@@ -289,7 +223,9 @@ export const createOrder = async (
 ) => {
     try {
         const basket: IProduct[] = []
-        const products = await Product.find<IProduct>({})
+        const products = await Product.find<IProduct>({
+            _id: { $in: req.body.items },
+        })
         const userId = res.locals.user._id
         const { address, payment, phone, total, email, items, comment } =
             req.body
@@ -319,7 +255,10 @@ export const createOrder = async (
             customer: userId,
             deliveryAddress: address,
         })
-        const populateOrder = await newOrder.populate(['customer', 'products'])
+        const populateOrder = await newOrder.populate([
+            { path: 'customer', select: '-orders -tokens' },
+            { path: 'products' },
+        ])
         await populateOrder.save()
 
         return res.status(200).json(populateOrder)
@@ -350,7 +289,10 @@ export const updateOrder = async (
                         'Заказ по заданному id отсутствует в базе'
                     )
             )
-            .populate(['customer', 'products'])
+            .populate([
+                { path: 'customer', select: '-orders -tokens' },
+                { path: 'products' },
+            ])
         return res.status(200).json(updatedOrder)
     } catch (error) {
         if (error instanceof MongooseError.ValidationError) {
@@ -377,7 +319,10 @@ export const deleteOrder = async (
                         'Заказ по заданному id отсутствует в базе'
                     )
             )
-            .populate(['customer', 'products'])
+            .populate([
+                { path: 'customer', select: '-orders -tokens' },
+                { path: 'products' },
+            ])
         return res.status(200).json(deletedOrder)
     } catch (error) {
         if (error instanceof MongooseError.CastError) {
