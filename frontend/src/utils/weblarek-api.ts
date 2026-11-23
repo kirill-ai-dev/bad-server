@@ -16,7 +16,7 @@ import {
     UserResponse,
     UserResponseToken,
 } from '@types'
-import { getCookie, setCookie } from './cookie'
+import { clearLegacyAuthCookie, isSignedOut, markSignedOut } from './session'
 
 export const enum RequestStatus {
     Idle = 'idle',
@@ -32,9 +32,50 @@ export type ApiListResponse<Type> = {
 
 class Api {
     private readonly baseUrl: string
+    private csrfPromise?: Promise<string>
+    private refreshPromise?: Promise<UserResponseToken>
+    protected accessToken = ''
+    protected generation = 0
+    private controller = new AbortController()
+    protected canRefresh = !isSignedOut()
+    private currentUserId?: string
+    private onSessionIdentityReset?: () => void
     protected options: RequestInit
 
+    setSessionIdentityReset = (callback: () => void) => {
+        this.onSessionIdentityReset = callback
+    }
+
+    protected acceptUserIdentity(userId: string | undefined, generation: number) {
+        if (!userId) return
+        this.assertSession(generation)
+        if (this.currentUserId && this.currentUserId !== userId) {
+            this.onSessionIdentityReset?.()
+            this.clearSession()
+            throw new DOMException('Account changed', 'AbortError')
+        }
+        this.currentUserId = userId
+    }
+
+    clearSession = () => {
+        this.generation += 1
+        this.controller.abort()
+        this.controller = new AbortController()
+        this.accessToken = ''
+        this.currentUserId = undefined
+        this.csrfPromise = undefined
+        this.refreshPromise = undefined
+        this.canRefresh = false
+        markSignedOut(true)
+        clearLegacyAuthCookie()
+    }
+
+    protected assertSession(generation: number) {
+        if (generation !== this.generation) throw new DOMException('Session changed', 'AbortError')
+    }
+
     constructor(baseUrl: string, options: RequestInit = {}) {
+        clearLegacyAuthCookie()
         this.baseUrl = baseUrl
         this.options = {
             headers: {
@@ -54,20 +95,37 @@ class Api {
     }
 
     protected async request<T>(endpoint: string, options: RequestInit) {
+        const generation = this.generation
+        const signal = this.controller.signal
         try {
+            const headers = new Headers(options.headers)
+            if (!['GET', 'HEAD', 'OPTIONS'].includes(options.method || 'GET')) {
+                this.csrfPromise ??= fetch(`${this.baseUrl}/auth/csrf-token`, { credentials: 'include', signal })
+                    .then(res => this.handleResponse<{ csrfToken: string }>(res))
+                    .then(data => data.csrfToken)
+                    .finally(() => { if (generation === this.generation) this.csrfPromise = undefined })
+                headers.set('X-CSRF-Token', await this.csrfPromise)
+                this.assertSession(generation)
+            }
             const res = await fetch(`${this.baseUrl}${endpoint}`, {
                 ...this.options,
                 ...options,
+                headers,
+                credentials: 'include',
+                signal,
             })
-            return await this.handleResponse<T>(res)
+            const data = await this.handleResponse<T>(res)
+            this.assertSession(generation)
+            return data
         } catch (error) {
+            this.assertSession(generation)
             return Promise.reject(error)
         }
     }
 
     private refreshToken = () => {
         return this.request<UserResponseToken>('/auth/token', {
-            method: 'GET',
+            method: 'POST',
             credentials: 'include',
         })
     }
@@ -76,19 +134,25 @@ class Api {
         endpoint: string,
         options: RequestInit
     ) => {
+        const generation = this.generation
         try {
             return await this.request<T>(endpoint, options)
         } catch (error) {
-            const refreshData = await this.refreshToken()
+            this.assertSession(generation)
+            if (!this.canRefresh || (error as { statusCode?: number }).statusCode !== 401)
+                throw error
+            this.refreshPromise ??= this.refreshToken().finally(() => { if (generation === this.generation) this.refreshPromise = undefined })
+            const refreshData = await this.refreshPromise
             if (!refreshData.success) {
                 return Promise.reject(refreshData)
             }
-            setCookie('accessToken', refreshData.accessToken)
+            this.acceptUserIdentity(refreshData.user?.id, generation)
+            this.accessToken = refreshData.accessToken
             return await this.request<T>(endpoint, {
                 ...options,
                 headers: {
                     ...options.headers,
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             })
         }
@@ -152,7 +216,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             body: JSON.stringify(order),
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         }).then((data: IOrderResult) => data)
     }
@@ -166,7 +230,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             body: JSON.stringify({ status }),
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         })
     }
@@ -182,7 +246,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             {
                 method: 'GET',
                 headers: {
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             }
         )
@@ -199,7 +263,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             {
                 method: 'GET',
                 headers: {
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             }
         )
@@ -208,7 +272,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
     getOrderByNumber = (orderNumber: string): Promise<IOrderResult> => {
         return this.requestWithRefresh<IOrderResult>(`/order/${orderNumber}`, {
             method: 'GET',
-            headers: { Authorization: `Bearer ${getCookie('accessToken')}` },
+            headers: { Authorization: `Bearer ${this.accessToken}` },
         })
     }
 
@@ -220,13 +284,15 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             {
                 method: 'GET',
                 headers: {
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             }
         )
     }
 
     loginUser = (data: UserLoginBodyDto) => {
+        this.clearSession()
+        const generation = this.generation
         return this.request<UserResponseToken>('/auth/login', {
             method: 'POST',
             body: JSON.stringify(data),
@@ -234,10 +300,19 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
                 'Content-Type': 'application/json',
             },
             credentials: 'include',
+        }).then(data => {
+            this.assertSession(generation)
+            this.acceptUserIdentity(data.user?.id, generation)
+            this.accessToken = data.accessToken
+            this.canRefresh = true
+            markSignedOut(false)
+            return data
         })
     }
 
     registerUser = (data: UserRegisterBodyDto) => {
+        this.clearSession()
+        const generation = this.generation
         return this.request<UserResponseToken>('/auth/register', {
             method: 'POST',
             body: JSON.stringify(data),
@@ -245,20 +320,30 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
                 'Content-Type': 'application/json',
             },
             credentials: 'include',
+        }).then(data => {
+            this.assertSession(generation)
+            this.acceptUserIdentity(data.user?.id, generation)
+            this.accessToken = data.accessToken
+            this.canRefresh = true
+            markSignedOut(false)
+            return data
         })
     }
 
-    getUser = () => {
-        return this.requestWithRefresh<UserResponse>('/auth/user', {
+    getUser = async () => {
+        const generation = this.generation
+        const response = await this.requestWithRefresh<UserResponse>('/auth/user', {
             method: 'GET',
-            headers: { Authorization: `Bearer ${getCookie('accessToken')}` },
+            headers: { Authorization: `Bearer ${this.accessToken}` },
         })
+        this.acceptUserIdentity(response.user?.id, generation)
+        return response
     }
 
     getUserRoles = () => {
         return this.requestWithRefresh<string[]>('/auth/user/roles', {
             method: 'GET',
-            headers: { Authorization: `Bearer ${getCookie('accessToken')}` },
+            headers: { Authorization: `Bearer ${this.accessToken}` },
         })
     }
 
@@ -273,7 +358,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             {
                 method: 'GET',
                 headers: {
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             }
         )
@@ -285,27 +370,27 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             {
                 method: 'GET',
                 headers: {
-                    Authorization: `Bearer ${getCookie('accessToken')}`,
+                    Authorization: `Bearer ${this.accessToken}`,
                 },
             }
         )
     }
 
     logoutUser = () => {
+        this.clearSession()
         return this.request<ServerResponse<unknown>>('/auth/logout', {
-            method: 'GET',
+            method: 'POST',
             credentials: 'include',
         })
     }
 
     createProduct = (data: Omit<IProduct, '_id'>) => {
-        console.log(data)
         return this.requestWithRefresh<IProduct>('/product', {
             method: 'POST',
             body: JSON.stringify(data),
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         }).then((data: IProduct) => ({
             ...data,
@@ -321,7 +406,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             method: 'POST',
             body: data,
             headers: {
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         }).then((data) => ({
             ...data,
@@ -335,7 +420,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
             body: JSON.stringify(data),
             headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         }).then((data: IProduct) => ({
             ...data,
@@ -350,7 +435,7 @@ export class WebLarekAPI extends Api implements IWebLarekAPI {
         return this.requestWithRefresh<IProduct>(`/product/${id}`, {
             method: 'DELETE',
             headers: {
-                Authorization: `Bearer ${getCookie('accessToken')}`,
+                Authorization: `Bearer ${this.accessToken}`,
             },
         })
     }

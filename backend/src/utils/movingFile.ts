@@ -1,21 +1,21 @@
-import { existsSync, mkdirSync, rename } from 'fs'
+import { mkdir, rename } from 'fs/promises'
 import { basename, join } from 'path'
+import BadRequestError from '../errors/bad-request-error'
 
-function movingFile(imagePath: string, from: string, to: string) {
+export default async function movingFile(
+    imagePath: string,
+    from: string,
+    to: string
+) {
     const fileName = basename(imagePath)
-    const imagePathTemp = join(from, fileName)
-    const imagePathPermanent = join(to, fileName)
-
-    mkdirSync(to, { recursive: true })
-    if (!existsSync(imagePathTemp)) {
-        throw new Error('Ошибка при сохранении файла')
+    if (!/^[a-zA-Z0-9_-]+\.(png|jpe?g|gif|webp|svg)$/.test(fileName))
+        throw new BadRequestError('Недопустимое имя файла')
+    await mkdir(to, { recursive: true })
+    try {
+        await rename(join(from, fileName), join(to, fileName))
+    } catch (_error) {
+        throw new BadRequestError(
+            'Файл не найден среди загруженных изображений'
+        )
     }
-
-    rename(imagePathTemp, imagePathPermanent, (err) => {
-        if (err) {
-            throw new Error('Ошибка при сохранении файла')
-        }
-    })
 }
-
-export default movingFile

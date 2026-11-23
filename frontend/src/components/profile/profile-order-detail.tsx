@@ -1,3 +1,4 @@
+import { sanitizeComment } from '../../utils/sanitize'
 import Button from '@components/button'
 import DetailInfo from '@components/detail-info'
 import { OrderData } from '@slices/orders/type'
@@ -6,7 +7,7 @@ import { format } from 'date-fns'
 import { useEffect, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useDispatch, useSelector } from '../../services/hooks'
-import { selectOrderByNumber } from '../../services/selector'
+import { selectProfileOrderByNumber } from '../../services/selector'
 import { getCurrentUserOrderByNumber } from '../../services/slice/profile-orders/thunk'
 import { adapterOrderFromServer } from '../../utils/adapterOrderFromServer'
 import { Preloader } from '../preloader'
@@ -20,8 +21,7 @@ const CloseButton = () => {
 export default function ProfileOrderDetail() {
     const number = useParams().number || ''
     const dispatch = useDispatch()
-    const orderData = useSelector(selectOrderByNumber(+number))
-    console.log(orderData)
+    const orderData = useSelector(selectProfileOrderByNumber(+number))
 
     useEffect(() => {
         if (!orderData) {
@@ -73,7 +73,7 @@ export default function ProfileOrderDetail() {
                         {dataInfo.comment ? (
                             <div
                                 dangerouslySetInnerHTML={{
-                                    __html: dataInfo.comment,
+                                    __html: sanitizeComment(dataInfo.comment),
                                 }}
                             />
                         ) : (

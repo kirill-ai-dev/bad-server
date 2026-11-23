@@ -44,6 +44,8 @@ export const profileOrdersSlice = createSlice({
             .addCase(
                 getCurrentUserOrderByNumber.fulfilled,
                 (state, action: PayloadAction<IOrderResult>) => {
+                    state.ordersData = state.ordersData.filter(order => order.orderNumber !== action.payload.orderNumber)
+                    state.ordersData.push(action.payload)
                     state.orderSelected = adapterOrderFromServer(action.payload)
                     state.status = RequestStatus.Success
                 }

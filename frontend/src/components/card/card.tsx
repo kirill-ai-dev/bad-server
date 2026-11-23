@@ -71,8 +71,7 @@ export default function Card({
                     {price && full && (
                         <Button
                             onClick={() => {
-                                isBasket
-                                    ? navigate(
+                                if (isBasket) navigate(
                                           { pathname: AppRoute.Basket },
                                           {
                                               state: {
@@ -85,7 +84,7 @@ export default function Card({
                                               replace: true,
                                           }
                                       )
-                                    : addProductCart(dataCard)
+                                else addProductCart(dataCard)
                             }}
                         >
                             {!isBasket ? 'В корзину' : 'В корзине'}

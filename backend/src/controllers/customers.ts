@@ -1,10 +1,10 @@
 import { NextFunction, Request, Response } from 'express'
 import { FilterQuery } from 'mongoose'
+import escapeRegExp from '../utils/escapeRegExp'
 import NotFoundError from '../errors/not-found-error'
 import Order from '../models/order'
 import User, { IUser } from '../models/user'
 
-// TODO: Добавить guard admin
 // eslint-disable-next-line max-len
 // Get GET /customers?page=2&limit=5&sort=totalAmount&order=desc&registrationDateFrom=2023-01-01&registrationDateTo=2023-12-31&lastOrderDateFrom=2023-01-01&lastOrderDateTo=2023-12-31&totalAmountFrom=100&totalAmountTo=1000&orderCountFrom=1&orderCountTo=10
 export const getCustomers = async (
@@ -92,7 +92,7 @@ export const getCustomers = async (
         }
 
         if (search) {
-            const searchRegex = new RegExp(search as string, 'i')
+            const searchRegex = new RegExp(escapeRegExp(search as string), 'i')
             const orders = await Order.find(
                 {
                     $or: [{ deliveryAddress: searchRegex }],
@@ -120,21 +120,14 @@ export const getCustomers = async (
             limit: Number(limit),
         }
 
-        const users = await User.find(filters, null, options).populate([
-            'orders',
-            {
-                path: 'lastOrder',
-                populate: {
-                    path: 'products',
-                },
-            },
-            {
-                path: 'lastOrder',
-                populate: {
-                    path: 'customer',
-                },
-            },
-        ])
+        const users = await User.find(
+            filters,
+            { orders: 0, tokens: 0 },
+            options
+        ).populate({
+            path: 'lastOrder',
+            populate: { path: 'products' },
+        })
 
         const totalUsers = await User.countDocuments(filters)
         const totalPages = Math.ceil(totalUsers / Number(limit))
@@ -153,7 +146,6 @@ export const getCustomers = async (
     }
 }
 
-// TODO: Добавить guard admin
 // Get /customers/:id
 export const getCustomerById = async (
     req: Request,
@@ -161,17 +153,15 @@ export const getCustomerById = async (
     next: NextFunction
 ) => {
     try {
-        const user = await User.findById(req.params.id).populate([
-            'orders',
-            'lastOrder',
-        ])
+        const user = await User.findById(req.params.id)
+            .select('-orders -tokens')
+            .populate({ path: 'lastOrder', populate: { path: 'products' } })
         res.status(200).json(user)
     } catch (error) {
         next(error)
     }
 }
 
-// TODO: Добавить guard admin
 // Patch /customers/:id
 export const updateCustomer = async (
     req: Request,
@@ -181,9 +171,10 @@ export const updateCustomer = async (
     try {
         const updatedUser = await User.findByIdAndUpdate(
             req.params.id,
-            req.body,
+            { $set: req.body },
             {
                 new: true,
+                runValidators: true,
             }
         )
             .orFail(
@@ -192,14 +183,14 @@ export const updateCustomer = async (
                         'Пользователь по заданному id отсутствует в базе'
                     )
             )
-            .populate(['orders', 'lastOrder'])
+            .select('-orders -tokens')
+            .populate({ path: 'lastOrder', populate: { path: 'products' } })
         res.status(200).json(updatedUser)
     } catch (error) {
         next(error)
     }
 }
 
-// TODO: Добавить guard admin
 // Delete /customers/:id
 export const deleteCustomer = async (
     req: Request,
@@ -207,12 +198,14 @@ export const deleteCustomer = async (
     next: NextFunction
 ) => {
     try {
-        const deletedUser = await User.findByIdAndDelete(req.params.id).orFail(
-            () =>
-                new NotFoundError(
-                    'Пользователь по заданному id отсутствует в базе'
-                )
-        )
+        const deletedUser = await User.findByIdAndDelete(req.params.id)
+            .select('-orders -tokens')
+            .orFail(
+                () =>
+                    new NotFoundError(
+                        'Пользователь по заданному id отсутствует в базе'
+                    )
+            )
         res.status(200).json(deletedUser)
     } catch (error) {
         next(error)

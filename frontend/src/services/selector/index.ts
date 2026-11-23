@@ -18,6 +18,15 @@ export const selectOrderByNumber =
         return null
     }
 
+export const selectProfileOrderByNumber =
+    (orderNumber: number) => (state: RootState) => {
+        const userId = state.user.data?.id
+        if (!userId) return null
+        return state['profile-orders'].ordersData.find(order =>
+            order.orderNumber === orderNumber && order.customer?.id === userId
+        ) || null
+    }
+
 export const selectCustomerById =
     (customerId: string) => (state: RootState) => {
         if (state.customers.customersData.length) {

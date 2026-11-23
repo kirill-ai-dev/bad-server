@@ -13,22 +13,30 @@ const auth = async (req: Request, res: Response, next: NextFunction) => {
     let payload: JwtPayload | null = null
     const authHeader = req.header('Authorization')
     if (!authHeader?.startsWith('Bearer ')) {
-        throw new UnauthorizedError('Невалидный токен')
+        return next(new UnauthorizedError('Невалидный токен'))
     }
     try {
         const accessTokenParts = authHeader.split(' ')
         const aTkn = accessTokenParts[1]
-        payload = jwt.verify(aTkn, ACCESS_TOKEN.secret) as JwtPayload
+        payload = jwt.verify(aTkn, ACCESS_TOKEN.secret, {
+            algorithms: ['HS256'],
+        }) as JwtPayload
 
         const user = await UserModel.findOne(
             {
                 _id: new Types.ObjectId(payload.sub),
             },
-            { password: 0, salt: 0 }
+            { password: 0, salt: 0, orders: 0, tokens: 0 }
         )
 
         if (!user) {
             return next(new ForbiddenError('Нет доступа'))
+        }
+        if (
+            !Number.isSafeInteger(payload.version) ||
+            payload.version !== (user.sessionVersion || 0)
+        ) {
+            return next(new UnauthorizedError('Сессия завершена'))
         }
         res.locals.user = user
 

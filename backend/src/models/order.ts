@@ -72,6 +72,9 @@ const orderSchema: Schema = new Schema(
     { versionKey: false, timestamps: true }
 )
 
+orderSchema.index({ customer: 1, createdAt: -1, _id: -1 })
+orderSchema.index({ createdAt: -1, _id: 1 })
+
 orderSchema.pre('save', async function incrementOrderNumber(next) {
     const order = this
 
@@ -90,12 +93,16 @@ orderSchema.pre('save', async function incrementOrderNumber(next) {
 
 orderSchema.post('save', async function updateUserStats(doc) {
     await User.findById(doc.customer).then(function updateUser(user) {
-        user?.orders.push(doc.id)
-        user?.calculateOrderStats()
+        if (user) {
+            user.orders.push(doc.id)
+            return user.calculateOrderStats()
+        }
+        return undefined
     })
 })
 
 orderSchema.post('findOneAndDelete', async function updateUserStats(order) {
+    if (!order) return
     await User.findByIdAndUpdate(order.customer, {
         $pull: { orders: order._id },
     }).then((user) => user?.calculateOrderStats())
